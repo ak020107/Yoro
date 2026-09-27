@@ -1,0 +1,11 @@
+'use client';
+import {useRef,useState} from 'react';
+import Recorder,{type Recording} from './Recorder';
+import type {Attempt} from '@/lib/domain';
+import {PendingCoach} from './CoachFeedback';
+export default function StartingPoint({task,onReady,onBusy,disabled}:{task:string;onReady:(a:Attempt)=>void;onBusy:(busy:boolean)=>void;disabled:boolean}){
+ const [open,setOpen]=useState(false),[recording,setRecording]=useState<Recording|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[done,setDone]=useState(false);const id=useRef('');
+ async function submit(){if(!recording)return;setBusy(true);onBusy(true);setError('');id.current ||= crypto.randomUUID();try{const form=new FormData();form.set('requestId',id.current);form.set('kind','delivery');form.set('goal',task.slice(0,500));form.set('context','Starting point before a preparation plan. Describe observed strengths and one useful focus; do not compare against an imagined earlier take.');form.set('audio',recording.blob,'baseline.wav');form.set('duration',String(recording.duration));const r=await fetch('/api/attempts',{method:'POST',body:form});const a=await r.json();if(!r.ok)throw Error(a.error||'Could not assess your starting point.');onReady(a);setDone(true);}catch(e){setError((e as Error).message);}finally{setBusy(false);onBusy(false);}}
+ if(done)return <p className="notice" role="status">Your starting point is ready. Your plan can build on what we heard.</p>;
+ return <div className="starting-point"><button type="button" className="text-button" disabled={disabled||!task.trim()} onClick={()=>setOpen(!open)}>{open?'Skip the starting recording':'Want a plan based on your voice? Add a starting recording.'}</button>{open&&<><p>Try the opening in your own words, for 15–30 seconds. Optional: we can also start from your goal alone.</p><Recorder disabled={busy||disabled} onChange={r=>{setRecording(r);id.current='';}}/><small>Submitting shares audio with ElevenLabs and Gemini for coaching, like regular practice.</small><button type="button" disabled={busy||disabled||!recording} onClick={()=>void submit()}>Use this as my starting point</button>{busy&&<PendingCoach label="Listening for what to build on…"/>}</>}{error&&<p role="alert">{error}</p>}</div>;
+}

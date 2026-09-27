@@ -1,0 +1,19 @@
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const assert=require('node:assert/strict');
+const base=process.env.TEST_ORIGIN || 'http://127.0.0.1:3000';
+(async()=>{
+ const browser=await chromium.launch({channel:'msedge',headless:true,args:['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream']});
+ const context=await browser.newContext({viewport:{width:1280,height:900},permissions:['microphone']});const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ try{
+  await page.goto(base);await page.getByRole('button',{name:'Coach',exact:true}).click();await page.getByRole('heading',{name:'What would you like help with?'}).waitFor();
+  await page.getByRole('button',{name:'My Voice',exact:true}).click();await page.getByLabel('My strengths',{exact:true}).fill('I listen carefully');await page.getByLabel('My chosen practice focus').fill('Pause before the main idea');await page.getByRole('button',{name:'Save my profile'}).click();await page.getByText('Profile saved.',{exact:false}).waitFor();
+  await page.reload();await page.getByRole('button',{name:'Coach',exact:true}).click();await page.getByRole('heading',{name:'What would you like help with?'}).waitFor();await page.getByText('Your chosen focus: Pause before the main idea').waitFor();
+  await page.getByLabel('Tell your coach').fill('How can I sound interested?');await page.getByRole('button',{name:'Ask my coach'}).click();await page.getByText('Authored preview response',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Practice',exact:true}).click();await page.getByText('Practice with a conversation partner',{exact:true}).click();await page.getByRole('button',{name:'Start rehearsal',exact:true}).click();await page.getByLabel('Your reply',{exact:true}).fill('Yes! What did you think of the lecture?');await page.getByRole('button',{name:'Send reply',exact:true}).click();await page.getByRole('button',{name:'Rewind last exchange'}).waitFor();await page.getByRole('button',{name:'Rewind last exchange'}).click();await page.getByRole('button',{name:'Rewind last exchange'}).waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'Explore',exact:true}).click();await page.getByRole('button',{name:'Practice my delivery',exact:true}).click();await page.getByRole('button',{name:'Try preview exercise',exact:true}).click();await page.getByRole('button',{name:'Try that moment again'}).waitFor();await page.getByRole('button',{name:'Try that moment again'}).click();await page.getByRole('button',{name:'Try preview exercise',exact:true}).click();await page.getByRole('heading',{name:'Compare your attempts'}).waitFor();await page.getByRole('button',{name:'Not sure',exact:true}).click();
+  await page.getByRole('button',{name:'New attempt',exact:true}).click();await page.getByRole('button',{name:'Record response',exact:true}).click();await page.waitForTimeout(1200);await page.getByRole('button',{name:/Stop recording/}).click();await page.getByLabel('Your recorded response',{exact:true}).waitFor();await page.getByRole('button',{name:'Try preview exercise',exact:true}).click();await page.getByLabel('Submitted attempt',{exact:true}).waitFor();
+  for(const width of [320,390,768,1280,1440]){await page.setViewportSize({width,height:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,`overflow at ${width}`);}
+  await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Coach',exact:true}).click();
+  assert.deepEqual(errors,[]);console.log('PASS: profile persistence, coach preview, roleplay rewind, retry comparison, fake-device recording/upload, five viewport widths; no page errors');
+ }finally{await page.evaluate(async()=>{await fetch('/api/reset',{method:'DELETE'});}).catch(()=>{});await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1);});

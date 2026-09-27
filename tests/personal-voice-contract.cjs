@@ -1,0 +1,23 @@
+// Isolated lifecycle: fake provider/store, no uploads or paid requests.
+const assert=require('node:assert/strict'),fs=require('node:fs'),ts=require('typescript'),Module=require('node:module');
+const states=new Map(),cache=new Map();let creates=0,speaks=0,deletes=[];
+const state=id=>{if(!states.has(id))states.set(id,{personalVoice:null});return states.get(id);};
+const store={getState:async id=>state(id),transaction:async(id,fn)=>fn(state(id)),audio:async(s,id)=>cache.get(s+id),saveAudio:async(s,id,bytes)=>cache.set(s+id,{bytes}),removeAudio:async(s,id)=>cache.delete(s+id)};
+const provider={createPersonalVoice:async()=>{creates++;return {voice_id:'owned-secret',requires_verification:false};},recoverPersonalVoice:async()=>[{voice_id:'owned-secret'}],deletePersonalVoiceId:async id=>deletes.push(id),personalSpeech:async(id)=>{assert.equal(id,'owned-secret');speaks++;return Buffer.from('fake-mp3');}};
+const load=Module._load;Module._load=function(id,...args){if(id==='server-only')return {};if(id==='./store')return store;if(id==='./personal-voice-provider')return provider;return load.call(this,id,...args);};
+require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);
+const {handlePersonalVoice:handle,clearPersonalVoice:clear}=require('../lib/personal-voice-route.ts');
+const req=(body={})=>new Request('http://localhost/api/personal-voice',{method:'POST',body:JSON.stringify(body)});
+(async()=>{await assert.rejects(()=>handle(req(),'other','personal-voice/speech'),/Create your personal voice/);
+ state('owner').personalVoice={requestId:crypto.randomUUID(),providerId:'owned-secret',status:'preview',createdAt:new Date().toISOString(),demoIds:[],consentVersion:'1'};
+ await assert.rejects(()=>handle(req({accept:true}),'owner','personal-voice/accept'),/Listen/);
+ await assert.rejects(()=>handle(req({text:'hello',emotion:'warm'}),'owner','personal-voice/speech'),/Audition/);
+ await handle(req(),'owner','personal-voice/audition');await handle(req(),'owner','personal-voice/audition');assert.equal(speaks,1);
+ const accepted=await(await handle(req({accept:true}),'owner','personal-voice/accept')).json();assert.equal(accepted.status,'ready');assert.ok(!JSON.stringify(accepted).includes('owned-secret'));
+ await handle(req({text:'hello',emotion:'warm',providerId:'foreign'}),'owner','personal-voice/speech');assert.equal(speaks,2);
+ await assert.rejects(()=>handle(req({text:'hello',emotion:'warm'}),'other','personal-voice/speech'),/Create/);
+ await clear('owner');assert.deepEqual(deletes,['owned-secret']);assert.equal(cache.size,0);assert.equal(state('owner').personalVoice,null);
+ state('owner').personalVoice={requestId:'pending',status:'creating',createdAt:new Date().toISOString(),demoIds:[]};await assert.rejects(()=>clear('owner'),/progress/);
+ state('owner').personalVoice.status='review';await handle(req(),'owner','personal-voice/recover');assert.equal(state('owner').personalVoice.status,'preview');assert.equal(creates,0);
+ console.log('PASS personal voice: audition gating, ownership, cache, recovery, deletion, pending lock and private IDs. Mock services only.');
+})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -1,0 +1,41 @@
+// Explicit integration check: synthetic bytes only, isolated disposable database.
+const assert=require('node:assert/strict'),fs=require('node:fs'),ts=require('typescript'),Module=require('node:module');
+if(!process.env.MONGODB_URI)throw Error('Run with the local environment loaded.');
+process.env.MONGODB_DATABASE='yoro_deployment_check_'+Date.now();
+process.env.AUDIO_STORAGE='mongodb';
+const load=Module._load;Module._load=function(id,...args){if(id==='server-only')return {};return load.call(this,id,...args);};
+require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,f);
+const store=require('../lib/store.ts'),upload=require('../lib/enrollment-upload.ts');
+const owner='a'.repeat(64),other='b'.repeat(64),id=crypto.randomUUID();
+(async()=>{let db;
+ try{
+  db=await store.cloudDatabase();
+  await store.saveAudio(owner,id,Buffer.from('synthetic recording'),'audio/wav');
+  assert.equal((await store.audio(owner,id)).bytes.toString(),'synthetic recording');
+  assert.equal(await store.audio(other,id),null);
+  await store.retainAudio(owner,id,true);
+  assert.equal((await db.collection('recordings').findOne({_id:owner+':'+id})).expiresAt,undefined);
+  await store.retainAudio(owner,id,false);
+  await db.collection('recordings').updateOne({_id:owner+':'+id},{$set:{expiresAt:new Date(0)}});
+  assert.equal(await store.audio(owner,id),null);
+  await store.transaction(owner,s=>{s.introduction='skipped';});
+  assert.equal((await store.getState(owner)).introduction,'skipped');
+  await db.collection('session_locks').insertOne({_id:owner,owner:'another-instance',expiresAt:new Date(Date.now()+60000)});
+  await assert.rejects(store.transaction(owner,()=>{}),{status:409});
+  await db.collection('session_locks').deleteOne({_id:owner});
+  const request=crypto.randomUUID(),sample=Buffer.alloc(7200044,37),size=2500000;
+  for(let index=0;index<3;index++)await upload.storeEnrollmentChunk(owner,request,index,3,sample.subarray(index*size,(index+1)*size));
+  assert.deepEqual(await upload.assembledEnrollment(owner,request),sample);
+  await assert.rejects(upload.assembledEnrollment(other,request),{status:422});
+  await upload.clearEnrollment(owner,request);
+  await assert.rejects(upload.assembledEnrollment(owner,request),{status:422});
+  await assert.rejects(upload.storeEnrollmentChunk(owner,request,0,4,Buffer.from('x')),{status:422});
+  await store.saveAudio(owner,id,Buffer.from('test'),'audio/wav');await store.reset(owner);
+  assert.equal(await store.audio(owner,id),null);
+  process.env.DAILY_PROVIDER_REQUEST_LIMIT='2';
+  const {reserveProviderCall}=require('../lib/usage-budget.ts');
+  await reserveProviderCall();await reserveProviderCall();
+  await assert.rejects(reserveProviderCall(),{status:429});
+  console.log('PASS cloud recording ownership, expiry, retention, reset, cross-instance locking, daily request cap and lossless 150-second upload assembly.');
+ }finally{if(db&&db.databaseName.startsWith('yoro_deployment_check_'))await db.dropDatabase();}
+})().then(()=>process.exit(0)).catch(e=>{console.error(e.name,e.code||'',e.message?.includes('MongoDB')?e.message:'Cloud storage check failed');process.exit(1);});

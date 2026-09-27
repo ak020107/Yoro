@@ -1,0 +1,21 @@
+// Isolated route contracts. No provider calls or real session writes.
+const fs=require('fs'),assert=require('node:assert/strict'),Module=require('module'),ts=require('typescript'),path=require('path');const {NextRequest}=require('next/server');const states=new Map(),clips=new Map(),retained=new Map();let captured;
+const load=Module._load;require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);
+Module._load=function(id,...args){if(id==='server-only')return {};if(id==='@/lib/store'||id==='./store')return {getState:async id=>get(id),transaction:async(id,fn)=>fn(get(id)),audio:async(s,id)=>clips.get(s+id),retainAudio:async(s,id,keep)=>retained.set(s+id,keep)};if(id==='@/lib/providers')return {ServiceError:require('../lib/provider-request.ts').ServiceError,prepareLearningPlan:async(...args)=>{captured=args;return get(owner).learningPlans[0]}};if(id.startsWith('@/'))return load.call(this,path.join(process.cwd(),id.slice(2)),...args);return load.call(this,id,...args)};
+function get(id){if(!states.has(id))states.set(id,require('../lib/domain.ts').initialState());return states.get(id)}
+const {POST}=require('../app/api/[...path]/route.ts');const owner='c'.repeat(64),other='d'.repeat(64),planId=crypto.randomUUID(),first=crypto.randomUUID(),second=crypto.randomUUID();
+get(owner).learningPlans=[{id:planId,title:'Expo',steps:[]}];get(owner).attempts=[{id:first,input:'audio',source:'gemini'},{id:second,input:'audio',source:'gemini',parentId:first}];clips.set(owner+first,{bytes:Buffer.from('a')});clips.set(owner+second,{bytes:Buffer.from('b')});
+function request(action,body,session=owner){return POST(new NextRequest('http://127.0.0.1:3000/api/'+action,{method:'POST',headers:{origin:'http://127.0.0.1:3000',cookie:'voice_session='+session,'Content-Type':'application/json'},body:JSON.stringify(body)}),{params:Promise.resolve({path:action.split('/')})})}
+(async()=>{
+ assert.equal((await request('learning-plan/select',{id:planId},other)).status,404);assert.equal((await request('learning-plan/select',{id:planId})).status,200);assert.equal(get(owner).activePlanId,planId);
+ assert.equal((await request('return-check',{planId,dueAt:new Date(Date.now()-1000).toISOString()})).status,400);
+ const body={planId,dueAt:new Date(Date.now()+3600000).toISOString()};const r=await request('return-check',body);assert.equal(r.status,200);const item=await r.json();await request('return-check',body);assert.equal(get(owner).returns.length,1);
+ assert.equal((await request('return-check/complete',{id:item.id,outcome:'helped'},other)).status,404);
+ assert.equal((await request('return-check/notified',{id:item.id})).status,409);get(owner).returns[0].dueAt=new Date(Date.now()-1000).toISOString();assert.equal((await request('return-check/notified',{id:item.id})).status,200);
+ assert.equal((await request('return-check/complete',{id:item.id,outcome:'mixed',note:'Rushed my answer'})).status,200);assert.equal(get(owner).returns[0].note,'Rushed my answer');assert.ok(get(owner).returns[0].completedAt);
+ assert.equal((await request('comparisons/save',{id:second,keep:true},other)).status,404);assert.equal((await request('comparisons/save',{id:second,keep:true})).status,200);assert.equal(retained.get(owner+first),true);assert.equal(retained.get(owner+second),true);
+ assert.equal((await request('comparisons/save',{id:second,keep:false})).status,200);assert.equal(retained.get(owner+first),false);clips.delete(owner+first);assert.equal((await request('comparisons/save',{id:second,keep:true})).status,410);
+ assert.equal((await request('learning-plan',{requestId:crypto.randomUUID(),task:'Prepare my answer',baselineId:first})).status,200);assert.equal(captured[4].id,first);assert.equal(captured[3][0].note,'Rushed my answer');
+ assert.equal((await request('learning-plan',{requestId:crypto.randomUUID(),task:'Prepare my answer',baselineId:crypto.randomUUID()})).status,404);
+ console.log('PASS continuity API: owned plans/baselines/check-ins/comparisons, bounded reminders, idempotent check-in, retention and expired recording handling. Mock storage/providers.');
+})().catch(e=>{console.error(e);process.exitCode=1;});
